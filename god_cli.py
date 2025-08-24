@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import requests
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 import argparse
@@ -2177,15 +2178,24 @@ class OllamaCLI:
             return False
     
     def list_models(self) -> list:
-        """List available models"""
+        """List available models using ollama CLI command"""
         try:
-            response = requests.get(f"{self.base_url}/api/tags")
-            if response.status_code == 200:
-                models = response.json().get("models", [])
-                return [model["name"] for model in models]
+            result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0 and result.stdout.strip():
+                models = []
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split()
+                        if len(parts) >= 1:
+                            model_name = parts[0]
+                            models.append(model_name)
+                return models
+            return []
+        except subprocess.TimeoutExpired:
+            print("❌ Timeout getting models from Ollama")
             return []
         except Exception as e:
-            print(f"Error listing models: {e}")
+            print(f"❌ Error listing models: {e}")
             return []
     
     def chat(self, message: str, model: str = None) -> str:
@@ -2317,6 +2327,7 @@ class OllamaCLI:
         models = self.list_models()
         if not models:
             print("❌ No models found or connection failed")
+            print("💡 Try installing a model: ollama pull mistral:7b")
             return
         
         print("\n📚 Available Models:")
