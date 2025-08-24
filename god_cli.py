@@ -28,7 +28,7 @@ class OllamaCLI:
         # Available slash commands for completion
         self.slash_commands = [
             '/copy', '/copyall', '/help', '/clear', '/c', 
-            '/config', '/models', '/change', '/prompt', '/memory', '/extract', '/search', '/knowledge'
+            '/config', '/verify', '/models', '/change', '/prompt', '/memory', '/extract', '/search', '/knowledge'
         ]
         
         # Initialize database
@@ -1486,6 +1486,34 @@ class OllamaCLI:
         except Exception as e:
             print(f"❌ Could not update knowledge: {e}")
     
+    def verify_config(self):
+        """Verify configuration file and show debugging info"""
+        print("\n🔍 Configuration Verification")
+        print("=" * 40)
+        
+        print(f"📁 Config file path: {self.config_path}")
+        print(f"📝 Config file exists: {os.path.exists(self.config_path)}")
+        
+        if os.path.exists(self.config_path):
+            try:
+                with open(self.config_path, 'r') as f:
+                    file_content = f.read()
+                    file_config = json.loads(file_content)
+                
+                print(f"📊 File size: {len(file_content)} bytes")
+                print(f"📋 File default_model: {file_config.get('default_model', 'NOT FOUND')}")
+                print(f"🧠 Memory default_model: {self.config.get('default_model', 'NOT FOUND')}")
+                
+                if file_config.get('default_model') != self.config.get('default_model'):
+                    print("❌ MISMATCH: File and memory configs are different!")
+                else:
+                    print("✅ MATCH: File and memory configs are the same")
+                    
+            except Exception as e:
+                print(f"❌ Error reading config file: {e}")
+        else:
+            print("❌ Config file does not exist")
+    
     def delete_system_knowledge(self):
         """Delete system knowledge"""
         try:
@@ -2135,8 +2163,10 @@ class OllamaCLI:
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
+            print(f"✅ Configuration saved to: {self.config_path}")
         except Exception as e:
-            print(f"Warning: Could not save config: {e}")
+            print(f"❌ Error saving config: {e}")
+            print(f"Config path: {self.config_path}")
     
     def test_connection(self) -> bool:
         """Test connection to Ollama instance"""
@@ -2326,10 +2356,20 @@ class OllamaCLI:
                     if 0 <= model_index < len(models):
                         selected_model = models[model_index]
                         old_model = self.config.get('default_model')
+                        print(f"🔄 Changing model from '{old_model}' to '{selected_model}'")
+                        
+                        # Update the config
                         self.config['default_model'] = selected_model
+                        print(f"📝 Config updated in memory")
+                        
+                        # Save to file
                         self.save_config()
-                        print(f"✅ Model changed from '{old_model}' to '{selected_model}'")
-                        print(f"🔄 New default model: {selected_model}")
+                        
+                        # Verify the change
+                        current_model = self.config.get('default_model')
+                        print(f"✅ Model changed successfully!")
+                        print(f"🔄 New default model: {current_model}")
+                        print(f"📁 Config saved to: {self.config_path}")
                         break
                     else:
                         print(f"❌ Please enter a number between 1 and {len(models)}")
@@ -2369,6 +2409,9 @@ class OllamaCLI:
             
         elif cmd == '/config':
             self.show_config()
+            
+        elif cmd == '/verify':
+            self.verify_config()
             
         elif cmd == '/models':
             self.show_models_menu()
@@ -2501,6 +2544,7 @@ class OllamaCLI:
         print("  /help     - Show this help")
         print("  /clear    - Clear screen")
         print("  /config   - Show configuration")
+        print("  /verify   - Verify configuration file")
         print("  /models   - Show available models")
         print("  /change   - Change model")
         print("  /prompt   - Change system prompt")
