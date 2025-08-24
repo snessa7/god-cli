@@ -2161,7 +2161,7 @@ class OllamaCLI:
     def chat(self, message: str, model: str = None) -> str:
         """Send a chat message to Ollama"""
         if not model:
-            model = self.config.get("default_model", "llama2")
+            model = self.config.get("default_model", "gemma3:1b")
             
         # Get system knowledge to include in context
         system_knowledge = self.get_system_knowledge_for_context()
@@ -2329,6 +2329,7 @@ class OllamaCLI:
                         self.config['default_model'] = selected_model
                         self.save_config()
                         print(f"✅ Model changed from '{old_model}' to '{selected_model}'")
+                        print(f"🔄 New default model: {selected_model}")
                         break
                     else:
                         print(f"❌ Please enter a number between 1 and {len(models)}")

@@ -13,7 +13,7 @@ def load_config(config_path):
     """Load configuration from file"""
     default_config = {
         "ollama_url": "http://localhost:11434",
-        "default_model": "llama2",
+        "default_model": "gemma3:1b",
         "temperature": 0.7,
         "max_tokens": 2048,
         "system_prompt": "You are a helpful AI assistant.",
