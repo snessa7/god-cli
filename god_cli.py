@@ -16,6 +16,7 @@ import time
 import rlcompleter
 import sqlite3
 from datetime import datetime
+import platform
 
 class OllamaCLI:
     def __init__(self, config_path: str = None):
@@ -29,7 +30,7 @@ class OllamaCLI:
         # Available slash commands for completion
         self.slash_commands = [
             '/copy', '/copyall', '/help', '/clear', '/c', 
-            '/config', '/verify', '/models', '/change', '/prompt', '/memory', '/extract', '/search', '/knowledge'
+            '/config', '/verify', '/fixmodels', '/testclipboard', '/testdb', '/testsearch', '/models', '/change', '/prompt', '/memory', '/extract', '/search', '/knowledge', '/cleanup'
         ]
         
         # Initialize database
@@ -300,6 +301,10 @@ class OllamaCLI:
         """Extract and save key details from conversations"""
         print("\n🔍 Extract Key Details")
         print("=" * 40)
+        
+        # Validate prerequisites first
+        if not self.validate_extraction_prerequisites():
+            return
         
         # Show extraction options
         print("📋 Extraction Types:")
@@ -1067,6 +1072,7 @@ class OllamaCLI:
                         print("❌ Invalid action. Use: view <number>, copy <number>, delete <number>, or exit")
                         
                 except KeyboardInterrupt:
+                    print("\n❌ Action cancelled.")
                     break
                     
         except Exception as e:
@@ -1614,6 +1620,11 @@ class OllamaCLI:
         print("\n🔍 Advanced Memory Search")
         print("=" * 40)
         
+        # Validate search prerequisites
+        if not self.validate_search_prerequisites():
+            print("❌ Search system not ready. Please fix the issues above first.")
+            return
+        
         print("📋 Search Options:")
         print("  1. Search by Date (e.g., 'last Tuesday', '2024-08-20')")
         print("  2. Search by Topic (e.g., 'Python', 'AI', 'Web Development')")
@@ -2152,22 +2163,29 @@ class OllamaCLI:
             try:
                 with open(self.config_path, 'r') as f:
                     user_config = json.load(f)
+                    # Remove old custom_instruction_sets if it exists
+                    if 'custom_instruction_sets' in user_config:
+                        del user_config['custom_instruction_sets']
+                    if 'current_instruction_set' in user_config:
+                        del user_config['current_instruction_set']
                     default_config.update(user_config)
             except Exception as e:
                 print(f"Warning: Could not load config file: {e}")
                 
         return default_config
     
-    def save_config(self):
+    def save_config(self, quiet=False):
         """Save current configuration to file"""
         try:
             os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
             with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=2)
-            print(f"✅ Configuration saved to: {self.config_path}")
+            if not quiet:
+                print(f"✅ Configuration saved to: {self.config_path}")
         except Exception as e:
-            print(f"❌ Error saving config: {e}")
-            print(f"Config path: {self.config_path}")
+            if not quiet:
+                print(f"❌ Error saving config: {e}")
+                print(f"Config path: {self.config_path}")
     
     def test_connection(self) -> bool:
         """Test connection to Ollama instance"""
@@ -2183,7 +2201,9 @@ class OllamaCLI:
             result = subprocess.run(['ollama', 'list'], capture_output=True, text=True, timeout=10)
             if result.returncode == 0 and result.stdout.strip():
                 models = []
-                for line in result.stdout.strip().split('\n'):
+                lines = result.stdout.strip().split('\n')
+                # Skip the header line (first line)
+                for line in lines[1:]:
                     if line.strip():
                         parts = line.split()
                         if len(parts) >= 1:
@@ -2201,7 +2221,7 @@ class OllamaCLI:
     def chat(self, message: str, model: str = None) -> str:
         """Send a chat message to Ollama"""
         if not model:
-            model = self.config.get("default_model", "gemma3:1b")
+            model = self.config.get("default_model", "phi3.5:latest")
             
         # Get system knowledge to include in context
         system_knowledge = self.get_system_knowledge_for_context()
@@ -2220,7 +2240,7 @@ class OllamaCLI:
         }
         
         try:
-            response = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=30)
+            response = requests.post(f"{self.base_url}/api/chat", json=payload, timeout=60)
             if response.status_code == 200:
                 result = response.json()
                 response_text = result.get("message", {}).get("content", "No response")
@@ -2239,7 +2259,7 @@ class OllamaCLI:
                 if len(self.config["chat_history"]) > self.config.get("max_history", 10):
                     self.config["chat_history"] = self.config["chat_history"][-self.config.get("max_history", 10):]
                 
-                self.save_config()
+                self.save_config(quiet=True)
                 return response_text
             else:
                 return f"Error: {response.status_code} - {response.text}"
@@ -2248,10 +2268,19 @@ class OllamaCLI:
     
     def interactive_chat(self):
         """Start interactive chat session"""
+        # Validate and fix model configuration first
+        self.force_update_model_config()
+        
+        # Validate clipboard access
+        self.validate_clipboard_access()
+        
+        # Validate database connection
+        self.validate_database_connection()
+        
         print("🤖 God CLI - Ollama Chat Interface")
         print("=" * 50)
         print(f"Connected to: {self.base_url}")
-        print(f"Current model: {self.config.get('default_model', 'gemma3:1b')}")
+        print(f"Current model: {self.config.get('default_model', 'phi3.5:latest')}")
         print("Type 'quit', 'exit', or 'q' to end session")
         print("Type 'help' for commands")
         print("=" * 50)
@@ -2339,6 +2368,32 @@ class OllamaCLI:
         print("Commands:")
         print("  change - Change current model")
         print("  models - Show this menu again")
+        
+        # Offer model selection
+        try:
+            choice = input(f"\nSelect model (1-{len(models)}) or press Enter to continue: ").strip()
+            if choice.isdigit():
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(models):
+                    selected_model = models[choice_num - 1]
+                    if selected_model != self.config.get('default_model'):
+                        old_model = self.config.get('default_model')
+                        print(f"🔄 Changing model from '{old_model}' to '{selected_model}'")
+                        
+                        # Update the config
+                        self.config['default_model'] = selected_model
+                        self.save_config()
+                        
+                        print(f"✅ Model changed successfully!")
+                        print(f"🔄 New default model: {selected_model}")
+                    else:
+                        print(f"✅ '{selected_model}' is already the current model")
+                else:
+                    print(f"❌ Please enter a number between 1 and {len(models)}")
+        except KeyboardInterrupt:
+            print("\nModel selection cancelled.")
+        except ValueError:
+            print("❌ Please enter a valid number")
     
     def change_model(self):
         """Interactive model selection"""
@@ -2397,20 +2452,22 @@ class OllamaCLI:
         cmd = cmd_parts[0]
         
         if cmd == '/copy':
-            # Copy the last assistant response
-            if hasattr(self, 'last_response') and self.last_response:
-                self.copy_to_clipboard(self.last_response)
+            if len(cmd_parts) > 1:
+                # Copy specific text: /copy "text to copy"
+                text_to_copy = ' '.join(cmd_parts[1:])
+                if self.copy_to_clipboard(text_to_copy):
+                    print("✅ Custom text copied to clipboard!")
             else:
-                print("❌ No response to copy. Chat with the AI first!")
+                # Copy the last assistant response
+                if hasattr(self, 'last_response') and self.last_response:
+                    if self.copy_to_clipboard(self.last_response):
+                        print("✅ Last response copied to clipboard!")
+                else:
+                    print("❌ No response to copy. Chat with the AI first!")
                 
         elif cmd == '/copyall':
             # Copy entire conversation
             self.copy_conversation_to_clipboard()
-            
-        elif cmd == '/copy' and len(cmd_parts) > 1:
-            # Copy specific text: /copy "text to copy"
-            text_to_copy = ' '.join(cmd_parts[1:])
-            self.copy_to_clipboard(text_to_copy)
             
         elif cmd == '/help':
             self.show_slash_commands_help()
@@ -2424,6 +2481,18 @@ class OllamaCLI:
         elif cmd == '/verify':
             self.verify_config()
             
+        elif cmd == '/fixmodels':
+            self.force_update_model_config()
+            
+        elif cmd == '/testclipboard':
+            self.test_clipboard()
+            
+        elif cmd == '/testdb':
+            self.test_database()
+            
+        elif cmd == '/testsearch':
+            self.test_search_system()
+            
         elif cmd == '/models':
             self.show_models_menu()
             
@@ -2431,7 +2500,7 @@ class OllamaCLI:
             self.change_model()
             
         elif cmd == '/prompt':
-            self.change_system_prompt()
+            self.manage_system_prompt()
             
         elif cmd == '/memory':
             self.show_memory_info()
@@ -2444,6 +2513,8 @@ class OllamaCLI:
             
         elif cmd == '/knowledge':
             self.manage_system_knowledge()
+            
+
             
         else:
             # Show suggestions for partial matches
@@ -2481,54 +2552,29 @@ class OllamaCLI:
     
     def change_system_prompt(self):
         """Interactive system prompt change"""
-        print("\n🤖 System Prompt Management")
+        print("\n🤖 Edit System Prompt")
         print("=" * 40)
         print(f"Current system prompt:")
         print(f"'{self.config.get('system_prompt', 'You are a helpful AI assistant.')}'")
         print("\n" + "=" * 40)
         
-        print("\n📝 Enter new system prompt:")
-        print("💡 Tips:")
-        print("  - Be specific about the AI's role and behavior")
-        print("  - Include any special instructions or constraints")
-        print("  - Press Enter twice to finish")
-        print("  - Type 'cancel' to keep current prompt")
-        print("  - Type 'reset' to use default prompt")
-        print("\nEnter your new system prompt:")
+        print("\n📝 Enter new system prompt (or 'cancel' to keep current, 'reset' for default):")
         
-        lines = []
-        line_count = 0
-        
-        while True:
-            try:
-                line = input(f"Line {line_count + 1}: ").strip()
-                
-                if line.lower() == 'cancel':
-                    print("❌ System prompt change cancelled.")
-                    return
-                elif line.lower() == 'reset':
-                    new_prompt = "You are a helpful AI assistant."
-                    self.config['system_prompt'] = new_prompt
-                    self.save_config()
-                    print("✅ System prompt reset to default!")
-                    return
-                elif line == "":
-                    if lines:  # Empty line after content means done
-                        break
-                    else:
-                        print("❌ Please enter at least one line of text.")
-                        continue
-                else:
-                    lines.append(line)
-                    line_count += 1
-                    
-            except KeyboardInterrupt:
-                print("\n❌ System prompt change cancelled.")
+        try:
+            new_prompt = input("New prompt: ").strip()
+            
+            if new_prompt.lower() == 'cancel':
+                print("❌ System prompt change cancelled.")
                 return
-        
-        if lines:
-            new_prompt = "\n".join(lines)
-            old_prompt = self.config.get('system_prompt', 'You are a helpful AI assistant.')
+            elif new_prompt.lower() == 'reset':
+                new_prompt = "You are a helpful AI assistant."
+                self.config['system_prompt'] = new_prompt
+                self.save_config()
+                print("✅ System prompt reset to default!")
+                return
+            elif not new_prompt:
+                print("❌ System prompt cannot be empty.")
+                return
             
             # Confirm the change
             print(f"\n📋 New system prompt:")
@@ -2544,6 +2590,11 @@ class OllamaCLI:
                 print("🔄 New prompt will be used for future conversations.")
             else:
                 print("❌ System prompt change cancelled.")
+                
+        except KeyboardInterrupt:
+            print("\n❌ System prompt change cancelled.")
+        except EOFError:
+            print("\n❌ Input ended unexpectedly.")
     
     def show_slash_commands_help(self):
         """Show help for slash commands"""
@@ -2556,6 +2607,10 @@ class OllamaCLI:
         print("  /clear    - Clear screen")
         print("  /config   - Show configuration")
         print("  /verify   - Verify configuration file")
+        print("  /fixmodels - Fix model configuration issues")
+        print("  /testclipboard - Test clipboard functionality")
+        print("  /testdb   - Test database functionality")
+        print("  /testsearch   - Test search system functionality")
         print("  /models   - Show available models")
         print("  /change   - Change model")
         print("  /prompt   - Change system prompt")
@@ -2563,47 +2618,95 @@ class OllamaCLI:
         print("  /extract  - Extract key details from conversations")
         print("  /search   - Advanced memory search with metadata")
         print("  /knowledge - Manage system knowledge (files, text)")
+        print("  /prompt   - Manage system prompt")
+        print("  /cleanup  - Clean up old configuration")
         print("=" * 30)
     
-    def copy_to_clipboard(self, text):
-        """Copy text to clipboard using system commands"""
+    def validate_clipboard_access(self):
+        """Validate clipboard access and return available method"""
         try:
-            import subprocess
             import platform
-            
             system = platform.system()
             
             if system == "Darwin":  # macOS
-                process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
-                process.communicate(input=text.encode('utf-8'))
-                print("✅ Response copied to clipboard!")
+                # Test pbcopy availability
+                result = subprocess.run(['which', 'pbcopy'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return "pbcopy", "macOS clipboard"
+                else:
+                    return None, "pbcopy not found on macOS"
+                    
             elif system == "Linux":
-                try:
-                    process = subprocess.Popen(['xclip', '-selection', 'clipboard'], stdin=subprocess.PIPE)
-                    process.communicate(input=text.encode('utf-8'))
-                    print("✅ Response copied to clipboard!")
-                except FileNotFoundError:
-                    try:
-                        process = subprocess.Popen(['xsel', '--clipboard', '--input'], stdin=subprocess.PIPE)
-                        process.communicate(input=text.encode('utf-8'))
-                        print("✅ Response copied to clipboard!")
-                    except FileNotFoundError:
-                        print("❌ Clipboard tools not found. Install xclip or xsel.")
+                # Test xclip first
+                result = subprocess.run(['which', 'xclip'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return "xclip", "Linux xclip clipboard"
+                # Test xsel as fallback
+                result = subprocess.run(['which', 'xsel'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return "xsel", "Linux xsel clipboard"
+                else:
+                    return None, "Neither xclip nor xsel found on Linux"
+                    
             elif system == "Windows":
-                process = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
-                process.communicate(input=text.encode('utf-8'))
-                print("✅ Response copied to clipboard!")
+                # Test clip availability
+                result = subprocess.run(['where', 'clip'], capture_output=True, text=True)
+                if result.returncode == 0:
+                    return "clip", "Windows clipboard"
+                else:
+                    return None, "clip command not found on Windows"
             else:
-                print("❌ Clipboard not supported on this system.")
+                return None, f"Unsupported system: {system}"
                 
         except Exception as e:
-            print(f"❌ Failed to copy to clipboard: {e}")
+            return None, f"Error detecting clipboard: {e}"
+    
+    def copy_to_clipboard(self, text, quiet=False):
+        """Copy text to clipboard using system commands with validation"""
+        if not text or not text.strip():
+            if not quiet:
+                print("❌ No text to copy")
+            return False
+            
+        # Validate clipboard access first
+        method, description = self.validate_clipboard_access()
+        if not method:
+            if not quiet:
+                print(f"❌ Clipboard not available: {description}")
+                print("💡 Install required tools:")
+                if platform.system() == "Linux":
+                    print("  - xclip: sudo apt install xclip (Ubuntu/Debian)")
+                    print("  - xsel: sudo apt install xsel (Ubuntu/Debian)")
+            return False
+            
+        try:
+            if method == "pbcopy":
+                process = subprocess.Popen(['pbcopy'], stdin=subprocess.PIPE)
+                process.communicate(input=text.encode('utf-8'))
+            elif method == "xclip":
+                process = subprocess.Popen(['xclip', '-selection', 'clipboard'], stdin=subprocess.PIPE)
+                process.communicate(input=text.encode('utf-8'))
+            elif method == "xsel":
+                process = subprocess.Popen(['xsel', '--clipboard', '--input'], stdin=subprocess.PIPE)
+                process.communicate(input=text.encode('utf-8'))
+            elif method == "clip":
+                process = subprocess.Popen(['clip'], stdin=subprocess.PIPE)
+                process.communicate(input=text.encode('utf-8'))
+            
+            if not quiet:
+                print(f"✅ Text copied to clipboard using {description}")
+            return True
+                
+        except Exception as e:
+            if not quiet:
+                print(f"❌ Failed to copy to clipboard: {e}")
+            return False
     
     def copy_conversation_to_clipboard(self):
         """Copy entire conversation history to clipboard"""
         if not self.config.get('chat_history'):
             print("❌ No conversation history to copy")
-            return
+            return False
             
         conversation = []
         for entry in self.config['chat_history']:
@@ -2612,8 +2715,12 @@ class OllamaCLI:
             conversation.append("")  # Empty line between exchanges
         
         full_conversation = "\n".join(conversation)
-        self.copy_to_clipboard(full_conversation)
-        print("✅ Full conversation copied to clipboard!")
+        if self.copy_to_clipboard(full_conversation, quiet=True):
+            print("✅ Full conversation copied to clipboard!")
+            return True
+        else:
+            print("❌ Failed to copy conversation to clipboard")
+            return False
     
     def show_config(self):
         """Show current configuration"""
@@ -2624,6 +2731,457 @@ class OllamaCLI:
         print(f"  Max Tokens: {self.config.get('max_tokens')}")
         print(f"  System Prompt: {self.config.get('system_prompt')[:50]}...")
         print(f"  Chat History: {len(self.config.get('chat_history', []))} messages")
+    
+    def force_update_model_config(self):
+        """Force update configuration with available models"""
+        available_models = self.list_models()
+        if not available_models:
+            print("❌ No models available")
+            return False
+            
+        print(f"🔄 Available models: {', '.join(available_models)}")
+        print(f"📝 Current config model: {self.config.get('default_model')}")
+        
+        # If current model is not available, switch to first available
+        if self.config.get('default_model') not in available_models:
+            new_model = available_models[0]
+            print(f"🔄 Switching to '{new_model}' (first available)")
+            self.config['default_model'] = new_model
+            self.save_config()
+            print(f"✅ Configuration updated!")
+            return True
+        else:
+            print(f"✅ Current model '{self.config.get('default_model')}' is available")
+            return True
+    
+    def show_models_menu(self):
+        """Show available models with selection options"""
+        models = self.list_models()
+        if not models:
+            print("❌ No models found or connection failed")
+            print("💡 Try installing a model: ollama pull mistral:7b")
+            return
+        
+        print("\n📚 Available Models:")
+        print("=" * 30)
+        for i, model in enumerate(models, 1):
+            current_indicator = " ← Current" if model == self.config.get('default_model') else ""
+            print(f"{i:2d}. {model}{current_indicator}")
+        print("=" * 30)
+        print("Commands:")
+        print("  change - Change current model")
+        print("  models - Show this menu again")
+        
+        # Offer model selection
+        try:
+            choice = input(f"\nSelect model (1-{len(models)}) or press Enter to continue: ").strip()
+            if choice.isdigit():
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(models):
+                    selected_model = models[choice_num - 1]
+                    if selected_model != self.config.get('default_model'):
+                        old_model = self.config.get('default_model')
+                        print(f"🔄 Changing model from '{old_model}' to '{selected_model}'")
+                        
+                        # Update the config
+                        self.config['default_model'] = selected_model
+                        self.save_config()
+                        
+                        print(f"✅ Model changed successfully!")
+                        print(f"🔄 New default model: {selected_model}")
+                    else:
+                        print(f"✅ '{selected_model}' is already the current model")
+                else:
+                    print(f"❌ Please enter a number between 1 and {len(models)}")
+        except KeyboardInterrupt:
+            print("\nModel selection cancelled.")
+        except ValueError:
+            print("❌ Please enter a valid number")
+    
+    def test_clipboard(self):
+        """Test clipboard functionality"""
+        print("\n📋 Clipboard Functionality Test")
+        print("=" * 40)
+        
+        method, description = self.validate_clipboard_access()
+        if method:
+            print(f"✅ Clipboard available: {description}")
+            
+            # Test with a simple text
+            test_text = "God CLI clipboard test - " + datetime.now().strftime("%H:%M:%S")
+            if self.copy_to_clipboard(test_text, quiet=True):
+                print("✅ Test copy successful! Check your clipboard.")
+                print(f"📝 Test text: '{test_text}'")
+            else:
+                print("❌ Test copy failed")
+        else:
+            print(f"❌ Clipboard not available: {description}")
+            print("\n💡 Troubleshooting:")
+            if platform.system() == "Darwin":
+                print("  - Ensure you're on macOS")
+                print("  - pbcopy should be available by default")
+            elif platform.system() == "Linux":
+                print("  - Install xclip: sudo apt install xclip (Ubuntu/Debian)")
+                print("  - Or install xsel: sudo apt install xsel (Ubuntu/Debian)")
+            elif platform.system() == "Windows":
+                print("  - clip command should be available by default")
+                print("  - Try running as administrator if issues persist")
+        
+        print("=" * 40)
+    
+    def validate_database_connection(self):
+        """Validate database connection and return status"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Test basic operations
+            cursor.execute('SELECT COUNT(*) FROM conversations')
+            cursor.fetchone()
+            
+            cursor.execute('SELECT COUNT(*) FROM extracted_info')
+            cursor.fetchone()
+            
+            conn.close()
+            return True, "Database connection successful"
+            
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                return False, "Database tables not initialized. Run the CLI to create them."
+            else:
+                return False, f"Database operational error: {e}"
+        except sqlite3.DatabaseError as e:
+            return False, f"Database corruption detected: {e}"
+        except Exception as e:
+            return False, f"Database connection failed: {e}"
+    
+    def validate_extraction_prerequisites(self):
+        """Validate prerequisites for extraction operations"""
+        # Check database connection
+        db_ok, db_message = self.validate_database_connection()
+        if not db_ok:
+            print(f"❌ Database issue: {db_message}")
+            return False
+        
+        # Check if there are conversations to extract from
+        conversations = self.get_conversation_history(limit=1)
+        if not conversations:
+            print("❌ No conversations found to extract from.")
+            print("💡 Chat with the AI first to create some conversation history.")
+            return False
+        
+        return True
+    
+    def show_extraction_progress(self, current, total, operation="Processing"):
+        """Show progress indicator for extraction operations"""
+        if total <= 1:
+            return
+        
+        percentage = (current / total) * 100
+        bar_length = 20
+        filled_length = int(bar_length * current // total)
+        bar = '█' * filled_length + '░' * (bar_length - filled_length)
+        
+        print(f"\r{operation}: [{bar}] {current}/{total} ({percentage:.1f}%)", end='', flush=True)
+        if current == total:
+            print()  # New line when complete
+    
+    def test_database(self):
+        """Test database functionality and connection"""
+        print("\n🗄️  Database Functionality Test")
+        print("=" * 40)
+        
+        # Test connection
+        db_ok, db_message = self.validate_database_connection()
+        if db_ok:
+            print(f"✅ {db_message}")
+            
+            # Test basic operations
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Test conversations table
+                cursor.execute('SELECT COUNT(*) FROM conversations')
+                conv_count = cursor.fetchone()[0]
+                print(f"✅ Conversations table: {conv_count} records")
+                
+                # Test extracted_info table
+                cursor.execute('SELECT COUNT(*) FROM extracted_info')
+                extract_count = cursor.fetchone()[0]
+                print(f"✅ Extracted info table: {extract_count} records")
+                
+                # Test sessions table
+                cursor.execute('SELECT COUNT(*) FROM sessions')
+                session_count = cursor.fetchone()[0]
+                print(f"✅ Sessions table: {session_count} records")
+                
+                # Database size
+                db_size = os.path.getsize(self.db_path) if os.path.exists(self.db_path) else 0
+                db_size_mb = db_size / (1024 * 1024)
+                print(f"✅ Database size: {db_size_mb:.2f} MB")
+                
+                conn.close()
+                
+                # Test extraction prerequisites
+                if self.validate_extraction_prerequisites():
+                    print("✅ Extraction prerequisites: Ready")
+                else:
+                    print("⚠️  Extraction prerequisites: Some issues detected")
+                    
+            except Exception as e:
+                print(f"❌ Database test failed: {e}")
+        else:
+            print(f"❌ {db_message}")
+            print("\n💡 Troubleshooting:")
+            print("  - Ensure the CLI has been run at least once to initialize the database")
+            print("  - Check file permissions for the database directory")
+            print("  - Try restarting the CLI")
+        
+        print("=" * 40)
+    
+    def validate_database_connection(self):
+        """Validate database connection and return status"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Test basic operations
+            cursor.execute('SELECT COUNT(*) FROM conversations')
+            cursor.fetchone()
+            
+            cursor.execute('SELECT COUNT(*) FROM extracted_info')
+            cursor.fetchone()
+            
+            conn.close()
+            return True, "Database connection successful"
+            
+        except sqlite3.OperationalError as e:
+            if "no such table" in str(e).lower():
+                return False, "Database tables not initialized. Run the CLI to create them."
+            else:
+                return False, f"Database operational error: {e}"
+        except sqlite3.DatabaseError as e:
+            return False, f"Database corruption detected: {e}"
+        except Exception as e:
+            return False, f"Database connection failed: {e}"
+    
+    def validate_search_prerequisites(self):
+        """Validate search system prerequisites"""
+        try:
+            # Check database connection
+            if not self.validate_database_connection():
+                return False
+            
+            # Check if any extracted info exists
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM extracted_info')
+            extracted_count = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM metadata_index')
+            metadata_count = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            if extracted_count == 0:
+                print("❌ No extracted information found in memory.")
+                print("💡 Use /extract to create some memory entries first.")
+                return False
+                
+            if metadata_count == 0:
+                print("⚠️  Warning: No metadata index found.")
+                print("💡 This may affect search performance.")
+                print("🔄 Attempting to rebuild metadata index...")
+                self.rebuild_metadata_index()
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Search validation error: {e}")
+            return False
+    
+    def rebuild_metadata_index(self):
+        """Rebuild the metadata index for better search performance"""
+        try:
+            print("🔄 Rebuilding metadata index...")
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Clear existing index
+            cursor.execute('DELETE FROM metadata_index')
+            
+            # Get all extracted info
+            cursor.execute('''
+                SELECT id, created_at, topic, category, tags 
+                FROM extracted_info
+            ''')
+            
+            extracted_items = cursor.fetchall()
+            
+            if not extracted_items:
+                print("❌ No extracted information to index.")
+                conn.close()
+                return
+            
+            # Show progress
+            total = len(extracted_items)
+            for i, (item_id, created_at, topic, category, tags) in enumerate(extracted_items, 1):
+                self.show_extraction_progress(i, total, "Indexing")
+                
+                # Parse date components
+                try:
+                    dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    date_key = dt.strftime('%Y-%m-%d')
+                    weekday = dt.strftime('%A').lower()
+                    month = dt.strftime('%B').lower()
+                    year = dt.strftime('%Y')
+                except:
+                    date_key = created_at[:10] if created_at else 'unknown'
+                    weekday = 'unknown'
+                    month = 'unknown'
+                    year = 'unknown'
+                
+                # Insert metadata
+                cursor.execute('''
+                    INSERT INTO metadata_index 
+                    (extracted_info_id, date_key, weekday, month, year, topic_key, category_key, tags_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (item_id, date_key, weekday, month, year, 
+                      topic.lower() if topic else '', 
+                      category.lower() if category else '',
+                      tags.lower() if tags else ''))
+            
+            conn.commit()
+            conn.close()
+            print(f"\n✅ Metadata index rebuilt successfully! Indexed {total} items.")
+            
+        except Exception as e:
+            print(f"❌ Error rebuilding metadata index: {e}")
+            if 'conn' in locals():
+                conn.close()
+    
+    def test_search_system(self):
+        """Test search system functionality"""
+        print("\n🔍 Search System Test")
+        print("=" * 50)
+        
+        # Test database connection
+        print("1. Testing database connection...")
+        if self.validate_database_connection():
+            print("   ✅ Database connection successful")
+        else:
+            print("   ❌ Database connection failed")
+            return
+        
+        # Test search prerequisites
+        print("2. Testing search prerequisites...")
+        if self.validate_search_prerequisites():
+            print("   ✅ Search prerequisites met")
+        else:
+            print("   ❌ Search prerequisites not met")
+            return
+        
+        # Test metadata index
+        print("3. Testing metadata index...")
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM extracted_info')
+            extracted_count = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM metadata_index')
+            metadata_count = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM conversations')
+            conversations_count = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            print(f"   📊 Extracted info: {extracted_count} items")
+            print(f"   📊 Metadata index: {metadata_count} entries")
+            print(f"   📊 Conversations: {conversations_count} messages")
+            
+            if metadata_count == 0 and extracted_count > 0:
+                print("   ⚠️  Metadata index is empty - search may be slow")
+            elif metadata_count > 0:
+                print("   ✅ Metadata index is populated")
+                
+        except Exception as e:
+            print(f"   ❌ Error testing metadata: {e}")
+            return
+        
+        print("\n✅ Search system test completed!")
+        print("💡 Use /search to start searching your memory.")
+    
+    def manage_system_prompt(self):
+        """Simple system prompt management - view and edit"""
+        print("\n🤖 System Prompt Management")
+        print("=" * 50)
+        
+        current_prompt = self.config.get('system_prompt', 'You are a helpful AI assistant.')
+        print(f"📝 Current system prompt:")
+        print("=" * 50)
+        print(current_prompt)
+        print("=" * 50)
+        
+        while True:
+            print(f"\n📋 Actions:")
+            print("  1. Edit system prompt")
+            print("  2. Reset to default")
+            print("  3. Back to main menu")
+            
+            try:
+                choice = input("\nSelect action (1-3): ").strip()
+                
+                if choice == '1':
+                    self.change_system_prompt()
+                    break
+                elif choice == '2':
+                    self.config['system_prompt'] = "You are a helpful AI assistant."
+                    self.save_config()
+                    print("✅ System prompt reset to default!")
+                    break
+                elif choice == '3':
+                    print("✅ Returning to main menu...")
+                    break
+                else:
+                    print("❌ Please enter a number between 1-3")
+                    
+            except KeyboardInterrupt:
+                print("\n❌ Operation cancelled.")
+                break
+            except Exception as e:
+                print(f"❌ Error: {e}")
+                break
+    
+    def cleanup_old_config(self):
+        """Clean up old configuration by removing deprecated fields and resetting to defaults"""
+        print("\n🧹 Cleaning up old configuration...")
+        
+        # Remove old fields
+        old_fields = ['custom_instruction_sets', 'current_instruction_set']
+        removed_fields = []
+        
+        for field in old_fields:
+            if field in self.config:
+                del self.config[field]
+                removed_fields.append(field)
+        
+        # Reset system prompt to default if it was from old instruction sets
+        if self.config.get('system_prompt') != "You are a helpful AI assistant.":
+            old_prompt = self.config.get('system_prompt', '')
+            self.config['system_prompt'] = "You are a helpful AI assistant."
+            print(f"🔄 Reset system prompt from '{old_prompt[:50]}...' to default")
+        
+        # Save the cleaned config
+        self.save_config(quiet=True)
+        
+        if removed_fields:
+            print(f"✅ Removed old fields: {', '.join(removed_fields)}")
+        print("✅ Configuration cleaned up and reset to defaults!")
 
 def main():
     parser = argparse.ArgumentParser(description="God CLI - Ollama Chat Interface")
